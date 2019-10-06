@@ -1,7 +1,7 @@
 {
   "name": "@aburai/vue-wavesurfer",
   "version": "1.0.0",
-  "description": "Vue plugin for wavesurfer.js",
+  "description": "Vue plugin for customizable audio waveform visualization",
   "main": "index.js",
   "author": "aburai",
   "license": "MIT",

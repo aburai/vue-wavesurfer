@@ -1,6 +1,6 @@
 <script>
   import _ from 'lodash'
-  import {DEFAULT_CALLBACKS, DEFAULT_CONFIG} from '../shared/constants'
+  import {DEFAULT_CALLBACKS, DEFAULT_CONFIG, DEFAULTS_WAVESURFER} from '../shared/constants'
   import WaveSurfer from 'wavesurfer.js'
   import WaveSurferTimeline from 'wavesurfer.js/dist/plugin/wavesurfer.timeline.min.js'
   import WaveSurferRegions from 'wavesurfer.js/dist/plugin/wavesurfer.regions.min.js'
@@ -10,32 +10,9 @@
 
   const COLOR_CURSOR = '#313131'
   const COLOR_WAVE = '#D8B310'
-  const COLOR_WAVE_PROGRESS = '#EAEAEA'
-  const COLOR_WAVE_2 = '#715B38'
   const COLOR_REGION = 'rgba(241, 125, 14, 0.3)'
   const COLOR_REGION_TEMP = 'rgba(168, 168, 168, 0.5)'
 
-  const _DEFAULTS = {
-    backend: 'MediaElement',
-    mediaControls: false,
-    waveColor: COLOR_WAVE,
-    waveColor1: COLOR_WAVE,
-    waveColor2: COLOR_WAVE_2,
-    progressColor: COLOR_WAVE_PROGRESS,
-    cursorColor: COLOR_CURSOR,
-    barWidth: 2,
-    barGap: 0,
-    minPxPerSec: 1,
-    skipLength: 10, // skip Xs for or backward
-    fillParent: true,
-    scrollParent: false,
-    hideScrollbar: false,
-    interact: true,
-    responsive: true,
-    normalize: true,
-    // custom settings
-    drawType: 't0b1' // default|halfh|h75|t75b25|t0b1
-  }
   const _DEFAULTS_WAVE = {
     precision: 4,
     split: true,
@@ -416,7 +393,6 @@
         uid: null,
         wsa: null,
         wavesurfer: null,
-        dark: false,
         elevation: 4,
         filename: null,
         loading: true,
@@ -428,31 +404,29 @@
         currentTime: '--:--',
         isPlaying: false,
         scrollListener: null,
+        colorDialog: false,
         regions: [],
         regionsDialog: false,
+        regionId: null,
         regionsConfig: {
           size: 12,
           cls: 'pa-0',
           actions: true,
+          fieldstyle: 'outlined',
           rows: [
             [
               {name: 'range', label: 'Range', disabled: true}
             ],
             [
-              {name: 'name', label: 'Name'}
+              {name: 'name', label: 'Name', autofocus: true}
             ],
             [
               {name: 'notes', label: 'Notes', type: 'textarea'}
-            ],
-            [
-              {name: 'color', label: 'Color', inputType: 'color', clearable: false, size: 3}
             ]
           ]
         },
         regionsCallbacks: {
-          onSubmitAction(fd) {
-            console.log('fd', fd)
-          }
+          onSubmitAction: this.updateRegion
         }
       }
     },
@@ -513,7 +487,7 @@
           const reg = REGIONS.get(regId)
           return {
             id: reg.id,
-            color: reg.color,
+            color: reg.data.rgb || reg.color,
             range: reg.data.range || WAVE.formatTime(reg.start, reg.end),
             name: reg.data.name || '',
             notes: reg.data.notes || ''
@@ -521,7 +495,8 @@
         })
       },
 
-      theme() {
+      // handle global theme change
+      dark() {
         return this.$vuetify.theme.dark
       }
     },
@@ -545,8 +520,17 @@
         const zf = _.inRange(this.zoomFactor, 1, 50) ? this.zoomFactor : 1
         this.wavesurfer.zoom(zf)
       },
-      theme() {
-        console.log('this.theme', this.theme)
+      dark() {
+        const color = this.dark ? '#fff' : '#000'
+        this.wavesurfer.params.cursorColor = color
+        this.wavesurfer.drawer.updateCursor()
+        _.extend(this.wavesurfer.timeline.params, {
+          primaryColor: color,
+          secondaryColor: color,
+          primaryFontColor: color,
+          secondaryFontColor: color
+        })
+        this.wavesurfer.timeline.render()
       }
     },
 
@@ -605,20 +589,22 @@
       initWavesurfer() {
         this.filename = this.source
 
+        const color = this.dark ? '#fff' : '#000'
         const settings = _.defaults({
           container: '#' + this.waveId,
           height: this.config.height,
+          cursorColor: color,
           mediaContainer: '#' + this.waveMediaElementsId,
           waveColorGradient1: this.waveColorGradient1(),
           waveColorGradient2: this.waveColorGradient2(),
-          // progressColor: wlinGrad,
+          progressColor: color,
           plugins: this.plugins(),
           interact: this.config.interact,
           audioContext: {},
           closeAudioContext: true,
           // minPxPerSec: this.settingsWave.precision,
           splitChannels: this.config.splitChannels // splitting channels doubles height = 2 * 64 = 128
-        }, _DEFAULTS)
+        }, DEFAULTS_WAVESURFER)
 
         if (!settings.splitChannels) settings.height *= 2
 
@@ -631,6 +617,9 @@
             this.wavesurfer.drawer.drawBars = (peaks, channelIndex, start, end) => {
               return WaveRenderer(this.wavesurfer, peaks, channelIndex, start, end)
             }
+            // this.wavesurfer.minimap.drawer.drawBars = (peaks, channelIndex, start, end) => {
+            //   return WaveRenderer(this.wavesurfer.minimap.wavesurfer, peaks, channelIndex, start, end)
+            // }
           }
 
           this.loaded = false
@@ -661,7 +650,7 @@
           // fired only with backend: 'MediaElement'
           // fired only without peaks
           this.wavesurfer.on('waveform-ready', () => {
-            this.channels = _.get(this.wavesurfer, 'backend.buffer.numberOfChannels')
+            this.channels = _.get(this.wavesurfer, 'backend.buffer.numberOfChannels', this.channels)
           })
           this.wavesurfer.on('error', reject)
 
@@ -683,51 +672,16 @@
           })
 
           this.wavesurfer.on('region-created', function (reg) {
-            // console.log('region-created: reg', reg)
             reg.color = reg.color || COLOR_REGION_TEMP
             reg.resize = true
             reg.data.range = WAVE.formatTime(reg.start, reg.end)
-/*
-            const tidx = reg.data.tidx
-            // do not create two identical regions for the same contents index
-            if (tidx && getRegionFromIndex(tidx)) return removeRegion(reg.id)
-
-
-            const $reg = $(reg.element)
-
-            if (!reg.data.highlight && _.material) {
-              _.material.button({
-                appendTo: $reg,
-                label: _.material.icon('edit'),
-                icon: true
-              }).on('click', function () {
-                editRegion(reg)
-                return false
-              })
-              _.material.button({
-                appendTo: $reg,
-                label: _.material.icon('cancel'),
-                icon: true
-              }).css({position: 'absolute', bottom: 0, left: 0}).on('click', function () {
-                removeRegion(reg.id)
-                return false
-              })
-            }
-
-            const $name = $('<div/>').addClass('vxtr-region-name mdl--shadow')
-              .attr('data-regid', reg.id)
-              .css({ left: $reg.css('left'), width: $reg.width() })
-            $waveRegionData.append($name)
-            setRegionData(reg)
-            syncRegionData()
-*/
           })
           this.wavesurfer.on('region-update-end', reg => {
-            // console.log('region-update-end', reg)
-            reg.start = Math.floor(reg.start)
-            reg.end = Math.ceil(reg.end)
+            // reg.start = Math.floor(reg.start)
+            // reg.end = Math.ceil(reg.end)
             reg.data.range = WAVE.formatTime(reg.start, reg.end)
-            this.regions.push(reg.id)
+            if (!this.regions.includes(reg.id)) this.regions.push(reg.id)
+            else this.regions = _.slice(this.regions)
           })
           this.wavesurfer.on('region-removed', reg => {
             this.regions = this.regions.filter(r => r !== reg.id)
@@ -739,7 +693,7 @@
             // console.log('region over', reg)
           })
 
-          this.wavesurfer.on('redraw', REGIONS.sync.bind(this))
+          // this.wavesurfer.on('redraw', REGIONS.sync.bind(this))
           this.wavesurfer.on('zoom', () => {
             // console.log('zoom')
             // this.drawPeaks()
@@ -789,6 +743,7 @@
           })
         })
       },
+      // wavesurfer settings
       waveColorGradient1() {
         const {height} = this.config
         const canvas = document.createElement('canvas')
@@ -816,9 +771,7 @@
       plugins() {
         const plugins = []
 
-        // TODO set colors depending of current theme dark/light
-        const dark = this.$vuetify.theme.dark
-        const color = dark ? '#fff' : '#000'
+        const color = this.dark ? '#fff' : '#000'
 
         plugins.push(WaveSurferTimeline.create({
           container: '#' + this.waveTimelineId,
@@ -891,7 +844,6 @@
           this.drawPeaks()
         })
       },
-
       redraw() {
         this.wavesurfer.params.barWidth = this.config.barWidth
         this.wavesurfer.params.barGap = this.config.barGap
@@ -904,8 +856,6 @@
         if (_.isUndefined(splitted)) splitted = this.wavesurfer.params.splitChannels
 
         const width = this.wavesurfer.drawer.getWidth()
-        console.log('this.wavesurfer', this.wavesurfer)
-        console.log('width', width)
         // NOTE we need to set width to update sizes if parent by example was animated
         this.wavesurfer.drawer.setWidth(width)
         // this.wavesurfer.drawer.clearWave()
@@ -914,6 +864,7 @@
         this.wavesurfer.backend.setPeaks(peaks, this.wavesurfer.getDuration()) // put current peaks to backend for events like resize
         this.wavesurfer.drawer.drawBars(peaks, width, 0, width)
         this.wavesurfer.minimap.drawer.drawBars(this.wavesurfer.backend.mergedPeaks, width, 0, width)
+        console.log('this.wavesurfer.minimap', this.wavesurfer.minimap)
       },
 
       play() {
@@ -925,7 +876,6 @@
         const promise = this.wavesurfer.play()
         if (promise) {
           promise.then(() => {
-            console.log('then')
           }).catch((e) => {
             console.log('catch', e)
           })
@@ -942,23 +892,40 @@
       },
 
       editRegion(reg) {
+        this.regionId = reg.id
         const fd = {}
         _.each(reg, (value, key) => {
           fd[key] = {value}
         })
-        console.log('fd', fd)
         void this.$store.dispatch('vgf/_regionsData/GFCHANGE', fd)
-        // const rows = _.map(this.regionsConfig.rows, row => {
-        //   return _.map(row, col => {
-        //     col.value = reg[col.name]
-        //     return col
-        //   })
-        // })
-        // this.regionsConfig = Object.assign({}, this.regionsConfig, {rows})
         this.regionsDialog = true
+      },
+      updateRegion(fd) {
+        this.regionsDialog = false
+        const region = REGIONS.get(this.regionId)
+        if (!region) return
+
+        _.extend(region.data, {name: fd.name, notes: fd.notes})
+        REGIONS.save()
       },
       deleteRegion(reg) {
         REGIONS.get(reg.id).remove()
+      },
+
+      selectColor(item) {
+        this.regionId = item.id
+        this.colorDialog = true
+      },
+      onColorSelect(color) {
+        this.colorDialog = false
+        const region = REGIONS.get(this.regionId)
+        if (!region) return
+
+        region.color = color.rgba
+        region.data.rgb = color.rgb
+        region.updateRender()
+        this.wavesurfer.minimap.renderRegions()
+        REGIONS.save()
       },
 
       splitChannels() {
@@ -985,7 +952,7 @@
 
 <template>
   <VFlex class="v-wavesurfer" :class="mainClasses">
-    <VCard :elevation="elevation">
+    <VCard>
       <!--Header-->
       <slot name="header">
         <VCardTitle v-if="config.header" class="vws__header pt-1 px-4">
@@ -1053,11 +1020,11 @@
         </VBtn>
       </VCardActions>
 
-      <VSheet v-if="regions.length > 0" :id="waveRegionsId" class="v-wavesurfer__regions px-4">
+      <VSheet v-if="regions.length > 0" :id="waveRegionsId" class="v-wavesurfer__regions pa-4 pt-0">
         <VDataTable :headers="regionsDTHeaders" :items="regionsDTItems" sort-by="range" hide-default-footer dense>
           <template v-slot:item="{ item }">
             <tr>
-              <td>
+              <td @click.left="selectColor(item)">
                 <div class="v-wavesurfer__regions-color" :style="{'background': item.color}"></div>
               </td>
               <td>{{ item.id }}</td>
@@ -1071,8 +1038,13 @@
             </tr>
           </template>
         </VDataTable>
+
         <VDialog v-model="regionsDialog" max-width="480px">
           <VGridform name="regionsData" :config="regionsConfig" :callbacks="regionsCallbacks"></VGridform>
+        </VDialog>
+
+        <VDialog v-model="colorDialog" max-width="480px">
+          <VColorpicker :alpha="0.3" @click="onColorSelect"></VColorpicker>
         </VDialog>
       </VSheet>
     </VCard>
@@ -1081,9 +1053,9 @@
 
 <style lang="scss" scoped>
   .v-wavesurfer {
-    position: relative;
+    /*position: relative;*/
     /*margin-bottom: 16px;*/
-    overflow: hidden;
+    /*overflow: hidden;*/
 
     .vws__header {
       padding-bottom: 0;
@@ -1107,6 +1079,7 @@
     .v-wavesurfer__timer {
       display: inline-block;
       min-width: 80px;
+      margin: 0 4px;
       span {
         margin: 0 2px;
         font-size: 85%;
@@ -1116,6 +1089,13 @@
     .v-wavesurfer--split {
       i {
         transform: rotate(180deg);
+      }
+    }
+
+    .v-wavesurfer__actions {
+      > button {
+        margin-left: 4px;
+        margin-right: 4px;
       }
     }
 

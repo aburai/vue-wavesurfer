@@ -12,7 +12,6 @@ vue@^2.6.10:
   resolved "https://registry.yarnpkg.com/vue/-/vue-2.6.10.tgz#a72b1a42a4d82a721ea438d1b6bf55e66195c637"
   integrity sha512-ImThpeNU9HbdZL3utgMCq0oiMzAkt1mcgy3/E6zWC/G6AaQoeuFdsl9nDhTDU3X1R6FK7nsIUuRACVcjI+A2GQ==
 
-wavesurfer.js@^3.1.0:
+"wavesurfer.js@https://github.com/aburai/wavesurfer.js":
   version "3.1.0"
-  resolved "https://registry.yarnpkg.com/wavesurfer.js/-/wavesurfer.js-3.1.0.tgz#e6c8726afe7c3908550f4c07a0183c0f63724243"
-  integrity sha512-ip4NesZYmRVHGHukxRSXGRtqlKMKvqnWxD0JTJTCHyQk1GyQnASxL7zOrY+e6WRFL4/iDNiw96zDKAr9eNtuqg==
+  resolved "https://github.com/aburai/wavesurfer.js#3cd3ac085ae3648e9c8213f731d462af61a74f61"
