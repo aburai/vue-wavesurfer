@@ -1,12 +1,14 @@
 <script>
   import _ from 'lodash'
   import {DEFAULT_CALLBACKS, DEFAULT_CONFIG, DEFAULTS_WAVESURFER} from '../shared/constants'
-  import WaveSurfer from 'wavesurfer.js'
+  import WaveSurfer from 'wavesurfer.js/dist/wavesurfer.min.js'
   import WaveSurferTimeline from 'wavesurfer.js/dist/plugin/wavesurfer.timeline.min.js'
   import WaveSurferRegions from 'wavesurfer.js/dist/plugin/wavesurfer.regions.min.js'
   import WaveSurferCursor from 'wavesurfer.js/dist/plugin/wavesurfer.cursor.min.js'
   import WaveSurferMinimap from 'wavesurfer.js/dist/plugin/wavesurfer.minimap.min.js'
-  import WaveRenderer from '../shared/WaveRenderer'
+  import WaveRenderer, {defaultDrawBars} from '../shared/WaveRenderer'
+  import Peaks from '../shared/peaks'
+  import Store from '../shared/store'
 
   const COLOR_CURSOR = '#313131'
   const COLOR_WAVE = '#D8B310'
@@ -20,28 +22,13 @@
   }
 
   const WAVE = {
-    createRegion(data, color) {
-      const {start, end} = data
-      color = color || data.color || COLOR_REGION
-      return {
-        start: Math.floor(start / 1000),
-        end: Math.ceil(end / 1000),
-        color,
-        loop: false,
-        resize: true,
-        drag: false,
-        data: {
-          highlight: data.highlight,
-          name: data.name,
-          descr: data.descr
-        }
-      }
-    },
     // format time or time range
     // method expected time in seconds
     // NOTE wavesurfer do not equals with round
     formatTime(start, end) {
-      return (Math.round(start) === Math.round(end) ? [start] : [start, end])
+      start = Math.round(start)
+      end = Math.round(end)
+      return (start === end ? [start] : [start, end])
         .map(time =>
           [
             Math.floor((time % 3600) / 60), // minutes
@@ -73,7 +60,8 @@
         drag: true,
         data: {
           name: data.name,
-          notes: data.notes
+          notes: data.notes,
+          rgb: data.rgb || color
         }
       }
     },
@@ -93,17 +81,17 @@
           start: reg.start,
           end: reg.end,
           color: reg.color,
+          rgb: reg.data.rgb,
           range: reg.data.range || '',
           name: reg.data.name || '',
           notes: reg.data.notes || ''
         }
       })
-      window.localStorage.setItem(lsKey, JSON.stringify(lsData))
+      Store.set(lsKey, lsData)
     },
     load() {
       const lsKey = `v-wavesurfer-${window.btoa(this.filename)}`
-      const lsData = window.localStorage.getItem(lsKey)
-      return lsData ? JSON.parse(lsData) : []
+      return Store.get(lsKey, [])
     }
   }
 
@@ -393,17 +381,32 @@
         uid: null,
         wsa: null,
         wavesurfer: null,
+        vwsConfig: null,
         elevation: 4,
         filename: null,
+        peaks: null,
         loading: true,
         loaded: false,
         splitted: false,
         channels: 1,
         zoomFactor: 1,
+        scrollX: 0,
         duration: '',
         currentTime: '--:--',
+        viewHeight: 1,
+        restoredSettings: null,
         isPlaying: false,
+        playRate: '1',
+        playRates: [
+          {value: '0.50', text: '0.50x'},
+          {value: '0.75', text: '0.75x'},
+          {value: '1', text: '1.00x'},
+          {value: '1.25', text: '1.25x'},
+          {value: '1.50', text: '1.50x'},
+          {value: '1.75', text: '1.75x'}
+        ],
         scrollListener: null,
+        mousewheelListener: null,
         colorDialog: false,
         regions: [],
         regionsDialog: false,
@@ -452,7 +455,7 @@
       },
       peaksCount() {
         const peaks = this.getPeaks()
-        return peaks ? peaks.length : 0
+        return peaks ? _.isArray(peaks[0]) ? peaks[0].length : peaks.length : 0
       },
       audioData() {
         if (!this.wsa && !this.wavesurfer) return []
@@ -479,7 +482,7 @@
           {text: 'Range', value: 'range', width: '120px'},
           {text: 'Name', value: 'name'},
           {text: 'Notes', value: 'notes'},
-          {text: 'Actions', value: 'actions', sortable: false, align: 'right', width: '80px'}
+          {text: 'Actions', value: 'actions', sortable: false, align: 'right'}
           ]
       },
       regionsDTItems() {
@@ -503,6 +506,8 @@
 
     watch: {
       config() {
+        console.log('config changed')
+/*
         if (!this.wavesurfer || !this.wavesurfer.isReady) return
 
         // check changes changes that require a rebuild of the audiowaveform data
@@ -512,12 +517,13 @@
           this.config.splitChannels !== this.settingsWave.split
         )
         reload ? this.reload() : this.redraw()
+*/
       },
       regions() {
         REGIONS.save()
       },
       zoomFactor() {
-        const zf = _.inRange(this.zoomFactor, 1, 50) ? this.zoomFactor : 1
+        const zf = _.inRange(this.zoomFactor, 1, 100) ? this.zoomFactor : 1
         this.wavesurfer.zoom(zf)
       },
       dark() {
@@ -531,29 +537,42 @@
           secondaryFontColor: color
         })
         this.wavesurfer.timeline.render()
+      },
+      playRate() {
+        this.wavesurfer.setPlaybackRate(Number(this.playRate))
       }
     },
 
-    // modify rows here, mounted is too late
     created() {
+      this.vwsConfig = _.extend({}, DEFAULT_CONFIG, this.config)
       this.uid = this.name || _.uniqueId('vws')
-      this.splitted = this.config.splitChannels || false
+      this.loadSettings()
+      this.splitted = this.vwsConfig.splitChannels || false
+
+      // settings for audiowaveform
       this.settingsWave = _.defaults({
-        precision: this.config.precision,
-        bits: this.config.bits,
+        precision: this.vwsConfig.precision,
+        bits: this.vwsConfig.bits,
         split: true
       }, _DEFAULTS_WAVE)
+
+      // bind this context to regions helper methods
       _.functions(REGIONS).forEach(fn => {
         REGIONS[fn] = REGIONS[fn].bind(this)
       })
     },
     mounted() {
-      let minHeight = this.config.height
-      if (this.config.splitChannels) minHeight *= 2
+      this.viewHeight = this.restoredSettings.viewHeight
+      let minHeight = this.calcViewHeight()
+      if (this.vwsConfig.splitChannels) minHeight *= 2
+      const waveHeight = minHeight
       minHeight += 20 // timeline
-      minHeight += 32 // padding TODO calc that value
+      minHeight += 40 // minimap
+      minHeight += 28 // padding TODO calc that value
+
       this.$nextTick(() => {
         this.$refs.content.style.minHeight = `${minHeight}px`
+        this.$refs.wave.style.minHeight = `${waveHeight}px`
         this.initWavesurfer().then(() => {
           this.loading = false
           this._bindEvents()
@@ -563,27 +582,35 @@
         })
       })
     },
-
     beforeDestroy() {
       this._unbindEvents()
+      this.saveSettings()
       if (this.wavesurfer) {
         this.wavesurfer.destroy()
-        this.wavesurfer = null
       }
     },
 
     methods: {
       _bindEvents() {
         const wrapper = this.wavesurfer.drawer.wrapper
-        this.scrollListener = e => {
+        this.scrollListener = () => {
+          this.scrollX = wrapper.scrollLeft
+        }
+        wrapper.addEventListener('scroll', this.scrollListener, {passive: true})
+        this.mousewheelListener = e => {
           if (wrapper.clientWidth !== wrapper.scrollWidth) {
+            e.preventDefault()
             wrapper.scrollLeft += Number(e.deltaY)
           }
         }
-        this.wavesurfer.drawer.wrapper.addEventListener('mousewheel', this.scrollListener, {passive: true})
+        wrapper.addEventListener('mousewheel', this.mousewheelListener)
       },
       _unbindEvents() {
-        this.wavesurfer.drawer.wrapper.removeEventListener('mousewheel', this.scrollListener)
+        const wrapper = _.get(this, 'wavesurfer.drawer.wrapper')
+        if (wrapper) {
+          wrapper.removeEventListener('mousewheel', this.mousewheelListener)
+          wrapper.removeEventListener('scroll', this.scrollListener)
+        }
       },
 
       initWavesurfer() {
@@ -592,18 +619,19 @@
         const color = this.dark ? '#fff' : '#000'
         const settings = _.defaults({
           container: '#' + this.waveId,
-          height: this.config.height,
+          height: this.calcViewHeight(),
           cursorColor: color,
+          cursorWidth: 0,
           mediaContainer: '#' + this.waveMediaElementsId,
           waveColorGradient1: this.waveColorGradient1(),
           waveColorGradient2: this.waveColorGradient2(),
           progressColor: color,
           plugins: this.plugins(),
-          interact: this.config.interact,
+          interact: this.vwsConfig.interact,
           audioContext: {},
           closeAudioContext: true,
           // minPxPerSec: this.settingsWave.precision,
-          splitChannels: this.config.splitChannels // splitting channels doubles height = 2 * 64 = 128
+          splitChannels: this.vwsConfig.splitChannels // splitting channels doubles height = 2 * 64 = 128
         }, DEFAULTS_WAVESURFER)
 
         if (!settings.splitChannels) settings.height *= 2
@@ -611,15 +639,24 @@
         return new Promise((resolve, reject) => {
           this.wavesurfer = WaveSurfer.create(settings)
 
+          const cmap = this.$colorpicker.colorMap({colormap: 'warm', nshades: 20}).reverse()
           // custom renderer is can be deactivated
-          if (this.config.customRenderer !== false) {
-            this.wavesurfer.params.drawType = this.config.drawType
+          if (this.vwsConfig.customRenderer !== false) {
+            this.wavesurfer.params.drawType = this.vwsConfig.drawType
             this.wavesurfer.drawer.drawBars = (peaks, channelIndex, start, end) => {
-              return WaveRenderer(this.wavesurfer, peaks, channelIndex, start, end)
+              const ip = this.inspectPeaks(this.wavesurfer.backend.splitPeaks)
+              // return defaultDrawBars(this.wavesurfer, peaks, channelIndex, start, end)
+              return WaveRenderer(this.wavesurfer, peaks, channelIndex, start, end, this.vwsConfig, cmap, ip)
             }
-            // this.wavesurfer.minimap.drawer.drawBars = (peaks, channelIndex, start, end) => {
-            //   return WaveRenderer(this.wavesurfer.minimap.wavesurfer, peaks, channelIndex, start, end)
-            // }
+
+            // force rendering of merged peaks
+            this.wavesurfer.minimap.drawer.drawBars = (peaks, channelIndex, start, end) => {
+              const p = this.wavesurfer.backend.mergedPeaks || []
+              const ip = new Peaks(this.wavesurfer.backend.splitPeaks, this.wavesurfer.getDuration()).ipeaks
+              // const ip = this.inspectPeaks(this.wavesurfer.backend.splitPeaks)
+              // return defaultDrawBars(this.wavesurfer.minimap, peaks, channelIndex, start, end)
+              return WaveRenderer(this.wavesurfer.minimap, p, channelIndex, start, end, this.vwsConfig, null, ip)
+            }
           }
 
           this.loaded = false
@@ -640,17 +677,24 @@
             this.wavesurfer.timeline.render()
             this.duration = this.duration || WAVE.fmtTime(duration)
             this.$emit('ready', {...settings, ...this.settingsWave})
-            this.$refs.content.style.minHeight = null
             loader.style.display = 'none'
             loader.style.width = '0px'
             this.regions = _.map(REGIONS.get(), reg => reg.id)
             this.wavesurfer.drawer.wrapper.classList.add('scrollable-x')
+            // this.zoomFactor = this.wavesurfer.params.minPxPerSec
             resolve()
           })
           // fired only with backend: 'MediaElement'
           // fired only without peaks
           this.wavesurfer.on('waveform-ready', () => {
+            this.waveformReady()
             this.channels = _.get(this.wavesurfer, 'backend.buffer.numberOfChannels', this.channels)
+            this.zoomFactor = this.restoredSettings.zoomFactor
+            this.playRate = this.restoredSettings.playRate
+            // TODO wait for draw complete
+            _.delay(() => {
+              this.wavesurfer.drawer.wrapper.scrollLeft = this.restoredSettings.scrollX
+            }, 2000)
           })
           this.wavesurfer.on('error', reject)
 
@@ -671,27 +715,16 @@
             // console.log('interaction')
           })
 
-          this.wavesurfer.on('region-created', function (reg) {
-            reg.color = reg.color || COLOR_REGION_TEMP
-            reg.resize = true
-            reg.data.range = WAVE.formatTime(reg.start, reg.end)
-          })
-          this.wavesurfer.on('region-update-end', reg => {
-            // reg.start = Math.floor(reg.start)
-            // reg.end = Math.ceil(reg.end)
-            reg.data.range = WAVE.formatTime(reg.start, reg.end)
-            if (!this.regions.includes(reg.id)) this.regions.push(reg.id)
-            else this.regions = _.slice(this.regions)
-          })
-          this.wavesurfer.on('region-removed', reg => {
-            this.regions = this.regions.filter(r => r !== reg.id)
-          })
+          this.wavesurfer.on('region-created', this.createdRegion.bind(this))
+          this.wavesurfer.on('region-update-end', this.updatedRegion.bind(this))
+          this.wavesurfer.on('region-removed', this.removedRegion.bind(this))
           this.wavesurfer.on('region-mouseenter', reg => {
             // console.log('region over', reg)
           })
           this.wavesurfer.on('region-mouseleave', reg => {
             // console.log('region over', reg)
           })
+          this.wavesurfer.on('region-click', this.clickedRegion.bind(this))
 
           // this.wavesurfer.on('redraw', REGIONS.sync.bind(this))
           this.wavesurfer.on('zoom', () => {
@@ -711,11 +744,11 @@
             this.currentTime = time
           })
 
-          this.wavesurfer.setMute(this.config.muted)
+          this.wavesurfer.setMute(this.vwsConfig.muted)
           this.wavesurfer.disableDragSelection()
           this.wavesurfer.enableDragSelection(true)
 
-          if (this.config.peaks === false) {
+          if (this.vwsConfig.peaks === false) {
             this.wavesurfer.load(this.filename)
             this.loaded = true
             return
@@ -743,9 +776,10 @@
           })
         })
       },
+
       // wavesurfer settings
       waveColorGradient1() {
-        const {height} = this.config
+        const {height} = this.vwsConfig
         const canvas = document.createElement('canvas')
         const ctx = canvas.getContext('2d')
         const linGrad = ctx.createLinearGradient(0, 0, 0, height)
@@ -757,7 +791,7 @@
         return linGrad
       },
       waveColorGradient2() {
-        const {height} = this.config
+        const {height} = this.vwsConfig
         const canvas = document.createElement('canvas')
         const ctx = canvas.getContext('2d')
         const linGrad2 = ctx.createLinearGradient(0, height, 0, height * 2)
@@ -768,6 +802,9 @@
         linGrad2.addColorStop(1, 'rgba(113, 91, 56, 1)')
         return linGrad2
       },
+
+      // create plugins configuration
+      // timeline, regions, cursor, minimap
       plugins() {
         const plugins = []
 
@@ -782,11 +819,11 @@
           secondaryFontColor: color
         }))
 
-        const regions = REGIONS.load().map(reg => {
-          return REGIONS.create(reg)
-        })
+        // const regions = REGIONS.load().map(reg => {
+        //   return REGIONS.create(reg)
+        // })
         plugins.push(WaveSurferRegions.create({
-          regions,
+          // regions,
           dragSelection: this.config.canEdit && this.config.dragSelection,
           hideOnBlur: true,
           snapToGridInterval: true
@@ -794,6 +831,7 @@
 
         plugins.push(WaveSurferCursor.create({
           showTime: true,
+          followCursorY: true, // prevent overlapping region time tooltip
           opacity: 1,
           customStyle: {
             // bottom: 4,
@@ -802,6 +840,7 @@
           customShowTimeStyle: {
             backgroundColor: COLOR_CURSOR,
             color,
+            marginLeft: '16px', // prevent overlapping with drag cursor
             padding: '0 4px',
             fontSize: '11px',
             whiteSpace: 'nowrap',
@@ -816,7 +855,9 @@
           showOverview: true,
           showRegions: true,
           overviewBorderColor: 'rgba(0, 0, 0, 0.5)',
-          overviewBorderSize: 1
+          overviewBorderSize: 1,
+          overviewFullWidth: false,
+          hideScrollbar: true
         }))
 
         /*
@@ -830,6 +871,15 @@
         */
 
         return plugins
+      },
+
+      waveformReady() {
+        console.log('waveformReady')
+        this.$refs.content.style.minHeight = null
+        this.$refs.wave.style.minHeight = null
+        REGIONS.load().map(reg => {
+          this.wavesurfer.addRegion(REGIONS.create(reg))
+        })
       },
 
       reload() {
@@ -860,11 +910,23 @@
         this.wavesurfer.drawer.setWidth(width)
         // this.wavesurfer.drawer.clearWave()
 
+        console.log('this.wavesurfer.backend', this.wavesurfer.backend)
+        // console.log('this.wavesurfer.backend.mergedPeaks', this.wavesurfer.backend.mergedPeaks)
+        // this.wavesurfer.minimap.drawer.drawBars(this.wavesurfer.backend.mergedPeaks, width, 0, width)
+        this.wavesurfer.backend.setPeaks(this.wavesurfer.backend.mergedPeaks, this.wavesurfer.getDuration())
+        this.wavesurfer.minimap._onZoom()
+
         const peaks = splitted ? this.wavesurfer.backend.splitPeaks : this.wavesurfer.backend.mergedPeaks
         this.wavesurfer.backend.setPeaks(peaks, this.wavesurfer.getDuration()) // put current peaks to backend for events like resize
         this.wavesurfer.drawer.drawBars(peaks, width, 0, width)
-        this.wavesurfer.minimap.drawer.drawBars(this.wavesurfer.backend.mergedPeaks, width, 0, width)
-        console.log('this.wavesurfer.minimap', this.wavesurfer.minimap)
+      },
+      inspectPeaks(peaks) {
+        if (!peaks || !peaks.length) return
+
+        this.peaks = new Peaks(peaks, this.wavesurfer.getDuration())
+        this.peaks.silence = 10
+
+        return this.peaks.ipeaks
       },
 
       play() {
@@ -891,6 +953,42 @@
         this.wavesurfer.toggleMute()
       },
 
+      calcViewHeight() {
+        return this.vwsConfig.height * this.viewHeight
+      },
+      setViewHeight() {
+        // console.log('this.calcViewHeight()', this.calcViewHeight())
+        this.wavesurfer.setHeight(this.calcViewHeight())
+      },
+      toggleHeight(factor) {
+        let vh = this.viewHeight + (factor || 0)
+        if (vh < 1) vh = 1
+        if (vh > 5) vh = 5
+        this.viewHeight = vh
+        this.setViewHeight()
+      },
+
+      createdRegion(reg) {
+        reg.color = reg.color || COLOR_REGION_TEMP
+        reg.resize = true
+        reg.data.range = WAVE.formatTime(reg.start, reg.end)
+      },
+      updatedRegion(reg) {
+        // reg.start = Math.floor(reg.start)
+        // reg.end = Math.ceil(reg.end)
+        reg.data.range = WAVE.formatTime(reg.start, reg.end)
+        if (!this.regions.includes(reg.id)) this.regions.push(reg.id)
+        else this.regions = _.slice(this.regions)
+      },
+      removedRegion(reg) {
+        this.regions = this.regions.filter(r => r !== reg.id)
+      },
+      clickedRegion(reg, e) {
+        e.stopPropagation() // prevent progress changes
+        console.log('clicked:reg', reg)
+        this.peaks.peaksFromRegion(reg.start, reg.end)
+      },
+
       editRegion(reg) {
         this.regionId = reg.id
         const fd = {}
@@ -911,6 +1009,18 @@
       deleteRegion(reg) {
         REGIONS.get(reg.id).remove()
       },
+      playRegion(reg) {
+        const region = REGIONS.get(reg.id)
+        if (region) region.play()
+      },
+
+      silenceRegions() {
+        const regs = this.peaks.silenceRegions()
+        regs.forEach(reg => {
+          const nreg = this.wavesurfer.addRegion(REGIONS.create(reg, this.vwsConfig.ipeaks.sr))
+          this.regions.push(nreg.id)
+        })
+      },
 
       selectColor(item) {
         this.regionId = item.id
@@ -924,7 +1034,7 @@
         region.color = color.rgba
         region.data.rgb = color.rgb
         region.updateRender()
-        this.wavesurfer.minimap.renderRegions()
+        this.wavesurfer.minimap.renderRegion(region)
         REGIONS.save()
       },
 
@@ -932,10 +1042,10 @@
         this.splitted = !this.splitted
         this.wavesurfer.params.splitChannels = this.splitted
         // set peaks
-        this.drawPeaks()
+        // this.drawPeaks()
         // need to reduce height when split channel view is closed
         // setHeight calls drawBuffer to redraw
-        const height = this.config.height * (this.splitted ? 1 : 2)
+        const height = this.vwsConfig.height * this.viewHeight * (this.splitted ? 1 : 2)
         this.wavesurfer.setHeight(height)
       },
 
@@ -945,6 +1055,26 @@
 
         const len = this.wavesurfer.drawer.getWidth()
         return this.wavesurfer.backend.getPeaks(len, 0, len)
+      },
+
+      storeKey() {
+        return `v-wavesurfer-${this.name}`
+      },
+      saveSettings() {
+        if (!this.vwsConfig.store || !this.name) return
+
+        const {viewHeight, playRate, zoomFactor, scrollX} = this
+        Store.set(this.storeKey(), {
+          viewHeight,
+          playRate,
+          zoomFactor,
+          scrollX
+        })
+      },
+      loadSettings() {
+        if (!this.vwsConfig.store || !this.name) return
+
+        this.restoredSettings = Store.get(this.storeKey())
       }
     }
   }
@@ -979,7 +1109,7 @@
       <!--Content-->
       <VCardText ref="content" class="v-wavesurfer__content pt-3 px-4">
         <VSheet :id="uid" :class="sheetClasses">
-          <div :id="waveId" class="v-wavesurfer__wave"></div>
+          <div ref="wave" :id="waveId" class="v-wavesurfer__wave"></div>
           <div :id="waveTimelineId" class="v-wavesurfer__timeline"></div>
           <div :id="waveMinimapId" class="v-wavesurfer__minimap mt-2"></div>
           <div ref="loader" class="v-wavesurfer__loader"></div>
@@ -1009,14 +1139,26 @@
         <VBtn icon small @click.left="mute">
           <VIcon>{{isMuted ? 'mdi-volume-off' : 'mdi-volume-mute'}}</VIcon>
         </VBtn>
+        <VSelect v-model="playRate" :items="playRates" :style="{'max-width': '100px'}" flat solo dense hide-details></VSelect>
         <VSpacer></VSpacer>
-        <VSlider v-model="zoomFactor" label="Zoom" :min="1" :max="50" color="black" hide-details></VSlider>
+        <VSlider v-model="zoomFactor" label="Zoom" :min="1" :max="100" color="black" hide-details></VSlider>
         <VBtn v-if="channels > 1" :class="{'v-wavesurfer--split': !splitted}" icon small @click="splitChannels">
           <VIcon>mdi-call-split</VIcon>
         </VBtn>
         <VBtn text @click.left="getPeaks">
           {{peaksCount}}
           <VIcon right>mdi-equalizer</VIcon>
+        </VBtn>
+        <VBtn icon small @click.left="toggleHeight(1)">
+          <VIcon>mdi-magnify-plus</VIcon>
+        </VBtn>
+        <VBtn icon small @click.left="toggleHeight(-1)">
+          <VIcon>mdi-magnify-minus</VIcon>
+        </VBtn>
+      </VCardActions>
+      <VCardActions class="v-wavesurfer__actions pt-0 px-4">
+        <VBtn icon small @click.left="silenceRegions">
+          <VIcon>mdi-account-alert</VIcon>
         </VBtn>
       </VCardActions>
 
@@ -1031,7 +1173,8 @@
               <td>{{ item.range }}</td>
               <td>{{ item.name }}</td>
               <td>{{ item.notes }}</td>
-              <td>
+              <td class="text-right">
+                <VIcon small class="mr-4" @click="playRegion(item)">mdi-play</VIcon>
                 <VIcon small class="mr-4" @click="editRegion(item)">mdi-pen</VIcon>
                 <VIcon small @click="deleteRegion(item)">mdi-trash-can-outline</VIcon>
               </td>
@@ -1044,7 +1187,7 @@
         </VDialog>
 
         <VDialog v-model="colorDialog" max-width="480px">
-          <VColorpicker :alpha="0.3" @click="onColorSelect"></VColorpicker>
+          <VColorpicker :alpha="0.2" @click="onColorSelect"></VColorpicker>
         </VDialog>
       </VSheet>
     </VCard>

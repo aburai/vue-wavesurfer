@@ -1,25 +1,26 @@
-const _DEBUG = true
-function customDrawBars(wavesurfer, peaks, channelIndex, start, end) {
+const _DEBUG = false
+
+export default function customDrawBars(wavesurfer, peaks, channelIndex, start, end, config, colormap, ipeaks) {
     return wavesurfer.drawer.prepareDraw(peaks, channelIndex, start, end, function (_ref) {
         // if drawBars was called within ws.empty we don't pass a start and
         // don't want anything to happen
-        if (start === undefined) return
+        if (typeof start === 'undefined') return
         if (!_ref.peaks.length) return
-        let width = wavesurfer.drawer.getWidth()
+
+        const drawer = wavesurfer.drawer
+        let width = drawer.width
         if (!width) return
 
-        const preloadedPeaks = !(wavesurfer.backend.buffer && wavesurfer.backend.buffer.duration)
+        // const preloadedPeaks = !(wavesurfer.backend.buffer && wavesurfer.backend.buffer.duration)
 
-        if (_DEBUG) {
-            console.groupCollapsed('customDrawBars')
-            console.time('customDrawBars')
-        }
-
-        const {halfPixel} = wavesurfer.drawer
-        const {absmax, hasMinVals, height, offsetY, peaks, halfH} = _ref
+        const {halfPixel} = drawer
+        const {absmax, hasMinVals, height, offsetY, halfH} = _ref
+        const dpeaks = _ref.peaks
+        // const {barWidth = 1, pixelRatio, barGap = 1, useGradient} = wavesurfer.params
         const {barWidth = 1, pixelRatio, barGap = 1, drawType = 'default', useGradient} = wavesurfer.params
+        // const {drawType} = config
         const peakIndexScale = hasMinVals ? 2 : 1
-        const length = peaks.length / peakIndexScale
+        const length = dpeaks.length / peakIndexScale
         const bar = barWidth * pixelRatio
         const gap = barGap === 0 ? 0 : !barGap
             ? Math.max(pixelRatio, ~~(bar / 2))
@@ -29,9 +30,6 @@ function customDrawBars(wavesurfer, peaks, channelIndex, start, end) {
         const scale = length / width
         const first = start
         const last = isNaN(end) ? length - 1 : end
-
-        const cfg = {bar, gap, step, scale, first, last, length, barWidth, barGap, peakIndexScale, drawType, _ref, width}
-        if (_DEBUG) console.log(cfg)
 
         // FIXME split channels = false sets an offset above 32k
         // NOTE could be when "width = 0"
@@ -45,28 +43,36 @@ function customDrawBars(wavesurfer, peaks, channelIndex, start, end) {
             bottomRatio = offY === 0 ? 0 : 0.25
         }
 
-        if (_DEBUG) preloadedPeaks ? console.group('peaks') : console.groupCollapsed('peaks')
-
         const {waveColorGradient1, waveColorGradient2, waveColor1, waveColor2, waveColor} = wavesurfer.params
         const color1 = (useGradient ? waveColorGradient1 : waveColor1) || waveColor
         const color2 = (useGradient ? waveColorGradient2 : waveColor2) || waveColor
+        const s_color = config.ipeaks.s
+        const i_color = config.ipeaks.i
+        const peakColor = (peak, color) => {
+          if (colormap && colormap.length) {
+            const heat = Math.round(peak * colormap.length)
+            // console.log('peak', peak, heat, colormap[heat])
+            if (colormap[heat]) return colormap[heat]
+          }
+          if (color) return color
+          return offY ? color2 : color1
+        }
 
         let h, fx, fy, fwidth, fheight
         let i, p, pn, peak
         let runs = 0
+        if (_DEBUG) console.log('first, last, step', first, last, step)
         for (i = first; i < last; i += step) {
             runs++
             p = Math.floor(i * scale * peakIndexScale) // calc current peak index
             pn = Math.floor((i + step) * scale * peakIndexScale) - p // calc next peak index
-            peak = peaks[p] // get peak from this step
-            if (peakIndexScale === 1 && pn >= 2) { // if we have more than one peak in this step
-                const peaksScale = peaks.slice(p, p + pn)
-                // peak = Math.max(...peaksScale) // get max peak from peaks in sample step
-                peak = peaksScale.reduce((p, c) => p + Math.abs(c), 0) / pn // get avg peak from peaks in sample step
-                if (_DEBUG && i < 20) console.log('p=%s pn=%s peak=%s >', p, pn, peak, peaksScale.join(', '))
-            }
-            else {
-                if (_DEBUG && i < 20) console.log('p=%s pn=%s peak=%s', p, pn, peak)
+            peak = dpeaks[p] || 0 // get peak from this step
+          if (_DEBUG) console.log('p, pn, peak', p, pn, peak)
+            // if (peakIndexScale === 1 && pn >= 2) { // if we have more than one peak in this step
+            if (pn >= 2) { // if we have more than one peak in this step
+                const peaksScale = dpeaks.slice(p, p + pn)
+                if (config.scaleMax) peak = Math.max(...peaksScale) // get max peak from peaks in sample step
+                else peak = peaksScale.reduce((p, c) => p + Math.abs(c), 0) / pn // get avg peak from peaks in sample step
             }
 
             // draw peak with just one fillrect
@@ -84,9 +90,11 @@ function customDrawBars(wavesurfer, peaks, channelIndex, start, end) {
                     fy += h * 0.25
                     fheight = Math.abs(h / 0.75)
                 }
-                // if (i<10) console.log('fx, fy, fwidth, fheight', fx, fy, fwidth, fheight, h)
-                wavesurfer.params.waveColor = offY ? color2 : color1
-                wavesurfer.drawer.fillRect(fx, fy, fwidth, fheight)
+
+                if (fwidth && fheight) {
+                    wavesurfer.params.waveColor = peakColor(peak)
+                    drawer.fillRect(fx, fy, fwidth, fheight)
+                }
             }
             // draw peak for upper and lower bar
             else {
@@ -98,9 +106,8 @@ function customDrawBars(wavesurfer, peaks, channelIndex, start, end) {
                 fheight = h * topRatio
 
                 if (fwidth && fheight) {
-                    // if (i<20) console.log('upper: fx,fy,fw,fh,h', fx, fy, fwidth, fheight, h)
-                    wavesurfer.params.waveColor = color1
-                    wavesurfer.drawer.fillRect(fx, fy, fwidth, fheight)
+                    wavesurfer.params.waveColor = peakColor(peak, color1)
+                    drawer.fillRect(fx, fy, fwidth, fheight)
                 }
 
                 // Recalculate for lower bar
@@ -108,21 +115,57 @@ function customDrawBars(wavesurfer, peaks, channelIndex, start, end) {
                 fheight = h * bottomRatio
 
                 if (fwidth && fheight) {
-                    // if (i<20) console.log('lower: fx,fy,fw,fh,h', fx, fy, fwidth, fheight, h)
-                    wavesurfer.params.waveColor = color2
-                    wavesurfer.drawer.fillRect(fx, fy, fwidth, fheight)
+                    wavesurfer.params.waveColor = peakColor(peak, color2)
+                    drawer.fillRect(fx, fy, fwidth, fheight)
                 }
             }
-        }
 
-        if (_DEBUG) {
-            console.log('runs=%s step=%s chn=%s pre=%s', runs, step, offY ? 2 : 1, preloadedPeaks)
-            console.groupEnd()
-
-            console.timeEnd('customDrawBars')
-            console.groupEnd()
+            if (ipeaks && (ipeaks[p] || '').trim()) {
+                if (ipeaks.slice(p, p + pn).indexOf(' ') === -1) {
+                  wavesurfer.params.waveColor = ipeaks[p] === 'i' ? i_color : s_color
+                  drawer.fillRect(fx, 1, fwidth, 2)
+                }
+            }
         }
     })
 }
 
-export default customDrawBars
+export function defaultDrawBars(wavesurfer, peaks, channelIndex, start, end) {
+  return wavesurfer.drawer.prepareDraw(peaks, channelIndex, start, end, function ({ absmax, hasMinVals, offsetY, halfH, peaks }) {
+    // if drawBars was called within ws.empty we don't pass a start and
+    // don't want anything to happen
+    if (typeof start === 'undefined') return
+
+    const drawer = wavesurfer.drawer
+    const params = wavesurfer.params
+    const halfPixel = drawer.halfPixel
+    // Skip every other value if there are negatives.
+    const peakIndexScale = hasMinVals ? 2 : 1
+    const length = peaks.length / peakIndexScale
+    const bar = params.barWidth * params.pixelRatio
+    const gap =
+      params.barGap === null
+        ? Math.max(params.pixelRatio, ~~(bar / 2))
+        : Math.max(
+        params.pixelRatio,
+        params.barGap * params.pixelRatio
+        )
+    const step = bar + gap
+    const scale = length / (drawer.width + 1)
+    const first = start
+    const last = end
+    let i = first
+
+    console.log('first, last, step', first, last, step)
+    for (i; i < last; i += step) {
+      const peak = peaks[Math.floor(i * scale * peakIndexScale)] || 0
+      const h = Math.round((peak / absmax) * halfH)
+      if (h) drawer.fillRect(
+        i + halfPixel,
+        halfH - h + offsetY,
+        bar + halfPixel,
+        h * 2
+      )
+    }
+  })
+}
