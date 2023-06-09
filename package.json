@@ -9,7 +9,7 @@
     "wavesurfer.js": "https://github.com/aburai/wavesurfer.js"
   },
   "devDependencies": {
-    "lodash": "^4.17.19",
+    "lodash": "^4.17.21",
     "vue": "^2.6.10"
   }
 }
